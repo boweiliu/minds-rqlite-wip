@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 160" width="240" height="160" role="img" aria-label="A database exposed on the web via a token-gated API">
+  <rect width="240" height="160" fill="#f4f4f4"/>
+  <rect x="0.5" y="0.5" width="239" height="159" fill="none" stroke="#d0d0d0"/>
+
+  <!-- URL bar hinting a public, token-gated endpoint -->
+  <rect x="16" y="14" width="208" height="20" rx="4" fill="#ffffff" stroke="#c2c2c2"/>
+  <circle cx="27" cy="24" r="3.2" fill="none" stroke="#8a8a8a" stroke-width="1.4"/>
+  <path d="M25.1 24.2 L26.6 25.6 L29 22.6" fill="none" stroke="#5c5c5c" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+  <rect x="38" y="20" width="120" height="8" rx="2" fill="#e3e3e3"/>
+  <text x="42" y="26.4" font-family="monospace" font-size="7" fill="#6d6d6d">/api/collections</text>
+  <rect x="194" y="19" width="22" height="10" rx="2" fill="#dcdcdc" stroke="#bdbdbd"/>
+  <!-- key glyph = token gated -->
+  <circle cx="201" cy="24" r="2.4" fill="none" stroke="#5c5c5c" stroke-width="1.2"/>
+  <path d="M203.4 24 L211 24 M209 24 L209 26.4 M211 24 L211 26.6" fill="none" stroke="#5c5c5c" stroke-width="1.2" stroke-linecap="round"/>
+
+  <!-- database cylinder (the store) -->
+  <path d="M30 66 V108 A30 10 0 0 0 90 108 V66" fill="#ffffff" stroke="#7a7a7a" stroke-width="1.6"/>
+  <path d="M30 66 A30 10 0 0 0 90 66" fill="none" stroke="#c4c4c4" stroke-width="1.4"/>
+  <path d="M30 87 A30 10 0 0 0 90 87" fill="none" stroke="#c4c4c4" stroke-width="1.4"/>
+  <ellipse cx="60" cy="66" rx="30" ry="10" fill="#ffffff" stroke="#7a7a7a" stroke-width="1.6"/>
+  <text x="60" y="128" font-family="monospace" font-size="8" fill="#6d6d6d" text-anchor="middle">rqlite</text>
+
+  <!-- connection: store -> globe -->
+  <line x1="92" y1="90" x2="150" y2="90" stroke="#9a9a9a" stroke-width="1.6" stroke-dasharray="4 3"/>
+  <circle cx="121" cy="90" r="3" fill="#7a7a7a"/>
+
+  <!-- globe = public web -->
+  <circle cx="182" cy="90" r="26" fill="#ffffff" stroke="#7a7a7a" stroke-width="1.6"/>
+  <g fill="none" stroke="#b6b6b6" stroke-width="1.3">
+    <ellipse cx="182" cy="90" rx="11" ry="26"/>
+    <line x1="156" y1="90" x2="208" y2="90"/>
+    <path d="M160 76 H204"/>
+    <path d="M160 104 H204"/>
+  </g>
+  <circle cx="182" cy="90" r="26" fill="none" stroke="#7a7a7a" stroke-width="1.6"/>
+
+  <!-- mini console row (collections list) -->
+  <rect x="16" y="140" width="208" height="12" rx="2" fill="#ffffff" stroke="#d6d6d6"/>
+  <rect x="21" y="144" width="30" height="4" rx="1" fill="#cfcfcf"/>
+  <rect x="57" y="144" width="46" height="4" rx="1" fill="#e0e0e0"/>
+  <rect x="176" y="144" width="18" height="4" rx="1" fill="#cfcfcf"/>
+  <rect x="198" y="144" width="20" height="4" rx="1" fill="#e0e0e0"/>
+</svg>

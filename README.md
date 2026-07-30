@@ -1,41 +1,34 @@
-# default-workspace-template
+# minds-rqlite-wip
 
-A self-contained template for running a persistent Claude agent that delegates work to sub-agents and can manage its own background services.
+Work-in-progress mind that exposes an rqlite-backed JSON data store on a stable public URL via a token-gated API, with a management console. The permanent-tunnel (ngrok) step is not yet finished.
 
-## Usage
+It runs a private JSON document store -- named collections of arbitrary-JSON
+documents backed by rqlite (SQLite over HTTP, with Raft durability) -- and
+exposes it to the internet through a token-gated REST API so an outside program,
+like a cloud agent running elsewhere, can read and write the mind's data with a
+single secret bearer token. A plain grayscale web console lets you browse
+collections, reveal and rotate the connection token, and watch an activity log
+of API requests. Security is structural: a public port serves only the
+token-gated data API while a separate, non-tunneled admin port serves the
+console and token, the 256-bit token is constant-time checked, and all SQL is
+parameterized (no raw-SQL endpoint). It is a work in progress -- the store, API,
+console, and security are done and verified, but making the public URL permanent
+(via ngrok or a named tunnel) is still the remaining work.
 
-```bash
-mngr create my-workspace main -t local \
-    --host-env MINDS_WORKSPACE_NAME=my-workspace \
-    --project ~/project/default-workspace-template
-```
+This repository is a published **minds inspiration**: a clean, bootable
+snapshot of the apps and features a mind built, ready to adapt into your own.
+It is NOT the generic workspace template -- it is this specific project.
 
-## Structure
+## Use it
 
-- `CLAUDE.md` - Agent instructions
-- `parent.toml` - Upstream repo for pulling updates
-- `.mngr/settings.toml` - Agent types, create templates, command defaults
-- `skills/` - Agent skills (task delegation, services, self-update)
-- `scripts/` - Utility scripts (reviewer settings)
-- `event-processor/` - Pre-configured directory for creating persistent sub-agents
-- `supervisord.conf` - Supervisord config defining the background services
-- `libs/bootstrap/` - First-boot setup, then launches supervisord to supervise the services
-- `vendor/mngr/` - A vendored, mutable copy of mngr. Note that making changes here *will* affect the behavior of the `mngr` command
-- `vendor/tk/` - A vendored copy of the [tk](https://github.com/wedow/ticket) ticket tracker. The `ticket` script (also callable as `tk`) manages tickets stored as markdown. We point `TICKETS_DIR` at `runtime/tickets/` (set in `.mngr/settings.toml`'s `host_env`) so tickets live alongside the rest of `runtime/` (and are covered by the opt-in GitHub sync when the `github-sync` skill has enabled it).
+- **Create a new mind from it:** point a new minds workspace at this repo's
+  URL. On first boot the mind reads the inspiration and helps you connect your
+  own accounts and adapt it.
+- **Bring it into an existing mind:** run `/use-inspiration <this repo's URL>`.
 
-## Create templates
+## What's inside
 
-- `worker` - For sub-agents created via the launch-task skill (includes code review)
-- `subskill-worker` - Sub-agent for any flow that hands its worker the generic harden worker (the crystallize / update / heal artifact lifecycle, including the update-system-interface flow). Inherits from `worker` and pre-installs the single generic worker from `.agents/shared/worker/` into its own `.agents/skills/` as `harden-worker`.
+- **minds-rqlite-wip** -- [`inspiration-minds-rqlite-wip.md`](inspiration-minds-rqlite-wip.md) (published now)
 
-## Artifact harden lifecycle
-
-The main agent can promote ad-hoc work into reusable artifacts, fix artifacts that fail, and extend artifacts that came up short -- across skills, web services, and the system interface. The user-invokable surface is three generic operation leads (main agent side), each parameterized by the artifact:
-
-- `crystallize-artifact` - Create a new artifact (default: a skill reconstructed from the just-finished turn). Invoked directly post-turn, or by the live-half wrappers (`build-web-service`, `fetch-process-show`) once a prototype is confirmed.
-- `heal-artifact` - Fix a skill or service that errored or produced wrong results.
-- `update-artifact` - Extend / refactor / verify a skill, service, or shared reference; one flow with a committed-vs-emergent design-gate toggle.
-
-Each lead spawns a `subskill-worker` sub-agent that runs the single generic `harden-worker` sub-skill. The worker reads the operation and artifact from its task file and composes the universal `harden-artifact.md` contract with one `op-*.md` and one `artifact-*.md` reference under `.agents/shared/worker/references/`. Workers commit to `mngr/<task-name>` branches; main merges on user approval. (The same template also backs the `update-system-interface` flow, which wraps `update-artifact` with `artifact=system-interface` and adds its preview / safe-reveal go-live.)
-
-Crystallized skills are marked with `metadata.crystallized: true` in their SKILL.md frontmatter and follow the [agentskills.io](https://agentskills.io/specification) layout (`scripts/run.py` as a PEP 723 script, companion SKILL.md, optional `references/` and `assets/`).
+Each `inspiration-<slug>.md` is the full manifest for that inspiration: what
+it is, how it works, the prerequisites it needs, and how to adapt it.

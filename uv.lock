@@ -28,6 +28,7 @@ members = [
     "bootstrap",
     "browser",
     "cloudflare-tunnel",
+    "data-store",
     "default-workspace-template",
     "github-sync",
     "host-backup",
@@ -979,6 +980,25 @@ wheels = [
 ]
 
 [[package]]
+name = "data-store"
+version = "0.1.0"
+source = { editable = "libs/data_store" }
+dependencies = [
+    { name = "flask" },
+    { name = "flask-sock" },
+    { name = "httpx" },
+    { name = "werkzeug" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "flask", specifier = ">=3.0" },
+    { name = "flask-sock", specifier = ">=0.7" },
+    { name = "httpx", specifier = ">=0.27" },
+    { name = "werkzeug", specifier = ">=3.0" },
+]
+
+[[package]]
 name = "default-workspace-template"
 version = "0.1.0"
 source = { virtual = "." }
@@ -987,6 +1007,7 @@ dependencies = [
     { name = "bootstrap" },
     { name = "browser" },
     { name = "cloudflare-tunnel" },
+    { name = "data-store" },
     { name = "github-sync" },
     { name = "host-backup" },
     { name = "imbue-common" },
@@ -1017,6 +1038,7 @@ requires-dist = [
     { name = "bootstrap", editable = "libs/bootstrap" },
     { name = "browser", editable = "libs/browser" },
     { name = "cloudflare-tunnel", editable = "libs/cloudflare_tunnel" },
+    { name = "data-store", editable = "libs/data_store" },
     { name = "github-sync", editable = "libs/github_sync" },
     { name = "host-backup", editable = "libs/host_backup" },
     { name = "imbue-common", editable = "vendor/mngr/libs/imbue_common" },
