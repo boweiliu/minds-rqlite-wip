@@ -34,7 +34,9 @@ _TOKEN_FILENAME = "api_token"
 _TOKEN_NUM_BYTES = 32
 
 
-def _token_path(data_dir: Path) -> Path:
+def token_path(data_dir: Path) -> Path:
+    """On-disk location of the API token. This file is the ONLY place the token
+    is exposed -- it is never served over HTTP. Read it to obtain the token."""
     return data_dir / _TOKEN_FILENAME
 
 
@@ -44,7 +46,7 @@ def load_or_create_token(data_dir: Path) -> str:
     The token file is written with owner-only (0600) permissions so it is not
     world-readable on the host.
     """
-    path = _token_path(data_dir)
+    path = token_path(data_dir)
     if path.exists():
         return path.read_text().strip()
     return rotate_token(data_dir)
@@ -54,7 +56,7 @@ def rotate_token(data_dir: Path) -> str:
     """Generate a fresh token, persist it with strict permissions, and return it."""
     data_dir.mkdir(parents=True, exist_ok=True)
     token = secrets.token_urlsafe(_TOKEN_NUM_BYTES)
-    path = _token_path(data_dir)
+    path = token_path(data_dir)
     # Create with 0600 from the start rather than widening then narrowing.
     file_descriptor = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(file_descriptor, "w") as handle:

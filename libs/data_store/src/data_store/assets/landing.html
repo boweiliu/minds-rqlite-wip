@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>data-store</title>
+<style>
+  :root {
+    --bg: #0f0f10; --panel: #17181a; --panel-2: #1e1f22; --line: #2c2e33;
+    --fg: #e7e7e9; --muted: #9a9ca1; --accent: #d7d7db;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 14px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  header { padding: 22px; border-bottom: 1px solid var(--line); }
+  header h1 { margin: 0; font-size: 18px; font-weight: 600; letter-spacing: .3px; }
+  header p { margin: 6px 0 0; color: var(--muted); font-size: 13px; max-width: 720px; }
+  main { max-width: 900px; margin: 0 auto; padding: 22px; display: grid; gap: 22px; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 18px; }
+  .panel h2 { margin: 0 0 14px; font-size: 12px; text-transform: uppercase; letter-spacing: 1px; color: var(--muted); }
+  .grid2 { display: grid; grid-template-columns: 1fr auto; gap: 18px; align-items: start; }
+  .row { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; flex-wrap: wrap; }
+  .row label { width: 90px; color: var(--muted); font-size: 12px; }
+  .val {
+    flex: 1; min-width: 220px; background: var(--panel-2); border: 1px solid var(--line);
+    border-radius: 6px; padding: 8px 10px; color: var(--fg); overflow-x: auto; white-space: nowrap;
+  }
+  button {
+    background: var(--panel-2); color: var(--fg); border: 1px solid var(--line);
+    border-radius: 6px; padding: 8px 12px; cursor: pointer; font: inherit;
+  }
+  button:hover { background: #26282c; }
+  .hint { color: var(--muted); font-size: 12px; }
+  .hint code, code.inline { background: var(--panel-2); padding: 1px 5px; border-radius: 4px; }
+  #qr { background: #fff; padding: 8px; border-radius: 8px; width: 148px; height: 148px; }
+  #qr img { width: 100%; height: 100%; display: block; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 14px; }
+  a.card {
+    display: block; text-decoration: none; color: inherit;
+    background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px; padding: 16px;
+  }
+  a.card:hover { border-color: var(--accent); background: #26282c; }
+  a.card .t { font-weight: 600; margin-bottom: 4px; }
+  a.card .d { color: var(--muted); font-size: 12px; }
+  .toast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%);
+    background: #26282c; border: 1px solid var(--line); padding: 8px 14px; border-radius: 6px;
+    opacity: 0; transition: opacity .2s; pointer-events: none; }
+  .toast.show { opacity: 1; }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+<header>
+  <h1>data-store</h1>
+  <p>A private rqlite (SQLite-over-HTTP) database, reachable over the internet behind a single bearer token. Point your own clients or agents at the SQL API, manage the data here, or try the demo.</p>
+</header>
+
+<main>
+  <section class="panel">
+    <h2>Connection</h2>
+    <div class="grid2">
+      <div>
+        <div class="row">
+          <label>API base</label>
+          <span class="val" id="apiUrl">—</span>
+          <button data-copy="apiUrl">Copy</button>
+        </div>
+        <div class="hint" id="urlState"></div>
+        <div class="hint" id="tokenHint" style="margin-top:8px"></div>
+        <div class="hint" style="margin-top:10px">
+          Example: <code class="inline">curl -H "Authorization: Bearer &lt;token&gt;" -d '[["SELECT 1"]]' &lt;API base&gt;/query</code>
+        </div>
+      </div>
+      <div id="qr" class="hidden" title="Scan to open the public URL on your phone"><img id="qrImg" alt="QR code" /></div>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>Where to go</h2>
+    <div class="cards">
+      <a class="card" href="db">
+        <div class="t">Manage database →</div>
+        <div class="d">Browse tables, run SQL, and rotate the access token.</div>
+      </a>
+      <a class="card" href="demo">
+        <div class="t">Try the demo →</div>
+        <div class="d">A drag-and-drop todo app built on the same API.</div>
+      </a>
+      <a class="card" href="llms.txt">
+        <div class="t">API docs for agents →</div>
+        <div class="d">/llms.txt — how an LLM client talks to /api.</div>
+      </a>
+    </div>
+  </section>
+</main>
+
+<div class="toast" id="toast"></div>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+function toast(m) { const t = $("toast"); t.textContent = m; t.classList.add("show"); setTimeout(() => t.classList.remove("show"), 1400); }
+function esc(s) { return String(s).replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c])); }
+
+document.addEventListener("click", (ev) => {
+  const c = ev.target.closest("[data-copy]");
+  if (!c) return;
+  navigator.clipboard.writeText($(c.getAttribute("data-copy")).textContent || "").then(() => toast("Copied")).catch(() => toast("Copy failed"));
+});
+
+async function init() {
+  try {
+    const res = await fetch("admin/connection");
+    if (!res.ok) throw new Error("not local");
+    const conn = await res.json();
+    $("apiUrl").textContent = conn.api_base || (location.origin + "/api");
+    $("urlState").textContent = conn.public_url
+      ? (conn.permanent_url ? "Permanent public URL (ngrok)." : "Interim public URL — changes if the tunnel restarts.")
+      : "Public tunnel not up yet — the URL will appear once it connects.";
+    $("tokenHint").innerHTML = "The bearer token is secret and never shown here — read it from <code>" + esc(conn.token_file || "data/.apps/data_store/api_token") + "</code> on the host.";
+    if (conn.qr_svg) { $("qrImg").src = conn.qr_svg; $("qr").classList.remove("hidden"); }
+  } catch (e) {
+    $("apiUrl").textContent = location.origin + "/api";
+    $("urlState").textContent = "You're on the public URL.";
+    $("tokenHint").innerHTML = "The bearer token is secret and never shown here — read it from <code>data/.apps/data_store/api_token</code> in the workspace.";
+  }
+}
+init();
+</script>
+</body>
+</html>

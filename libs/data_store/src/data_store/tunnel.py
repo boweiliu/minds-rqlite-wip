@@ -1,21 +1,26 @@
 """Public tunnel for the data-store API, with a stable and a fallback mode.
 
-Two modes, chosen at startup:
+Three modes, chosen at startup:
 
-- **ngrok (stable, recommended).** If ``runtime/secrets/data_store_ngrok.env``
+- **ngrok (stable, recommended).** If ``data/.secrets/data_store_ngrok.env``
   provides ``NGROK_AUTHTOKEN`` and ``NGROK_DOMAIN``, the tunnel runs ngrok bound
   to that reserved domain. The public URL is then permanently fixed --
   ``https://<domain>`` -- across restarts and container moves. ngrok's free tier
   includes one static domain, which is enough for this.
 
-- **localtunnel (fallback, zero-setup).** With no ngrok config, the tunnel runs
-  localtunnel. It works immediately with no account, but its free relay does not
-  reliably hold a fixed subdomain, so the hostname can change on restart. Good
-  enough to get going; not a permanent address.
+- **cloudflare quick tunnel (default fallback, zero-setup).** With no ngrok
+  config, the tunnel runs an anonymous ``cloudflared`` quick tunnel, giving a
+  ``https://<random>.trycloudflare.com`` URL. No account needed and more reliable
+  than localtunnel (no visitor interstitial), but the hostname is *not* fixed
+  across restarts -- a stopgap, not a permanent address.
 
-Either way the tunnel forwards only this one local port and security rests on the
-service's bearer token. The resolved URL is written to
-``DATA_DIR/public_url.txt`` for the API/viewer to display.
+- **localtunnel (opt-in fallback).** Set ``DATA_STORE_TUNNEL_PROVIDER=localtunnel``
+  to use localtunnel instead. It works with no account but its free relay does not
+  reliably hold a fixed subdomain either.
+
+Any mode forwards only this one local port and security rests on the service's
+bearer token. The resolved URL is written to ``DATA_DIR/public_url.txt`` for the
+API/viewer to display.
 """
 
 import logging
@@ -26,13 +31,14 @@ import subprocess
 import sys
 from pathlib import Path
 
-DATA_DIR = Path(os.environ.get("DATA_STORE_DATA_DIR", "runtime/data-store"))
+DATA_DIR = Path(os.environ.get("DATA_STORE_DATA_DIR", "data/.apps/data_store"))
 PORT = int(os.environ.get("DATA_STORE_PORT", "8080"))
 PUBLIC_URL_FILE = DATA_DIR / "public_url.txt"
 SUBDOMAIN_FILE = DATA_DIR / "tunnel_subdomain.txt"
-NGROK_SECRETS_FILE = Path("runtime/secrets/data_store_ngrok.env")
+NGROK_SECRETS_FILE = Path("data/.secrets/data_store_ngrok.env")
 
 _LOCALTUNNEL_URL_PATTERN = re.compile(r"https://[a-z0-9-]+\.loca\.lt")
+_CLOUDFLARE_URL_PATTERN = re.compile(r"https://[a-z0-9-]+\.trycloudflare\.com")
 _NGROK_AUTHTOKEN_PATTERN = re.compile(r"""^export\s+NGROK_AUTHTOKEN=["']?([^"'\s]+)["']?""", re.MULTILINE)
 _NGROK_DOMAIN_PATTERN = re.compile(r"""^export\s+NGROK_DOMAIN=["']?([^"'\s]+)["']?""", re.MULTILINE)
 
@@ -99,6 +105,19 @@ def _run_ngrok(authtoken: str, domain: str) -> int:
     return _forward_output_until_exit(process, url_pattern=None)
 
 
+def _run_cloudflare() -> int:
+    """Run an anonymous cloudflared quick tunnel; parse the trycloudflare URL."""
+    logger.info("using cloudflare quick tunnel (fallback); hostname is not fixed across restarts")
+    process = subprocess.Popen(
+        ["cloudflared", "tunnel", "--url", f"http://localhost:{PORT}", "--no-autoupdate"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+    return _forward_output_until_exit(process, url_pattern=_CLOUDFLARE_URL_PATTERN)
+
+
 def _run_localtunnel() -> int:
     """Run localtunnel; parse the assigned loca.lt URL from its output."""
     subdomain = _load_or_create_subdomain()
@@ -124,8 +143,10 @@ def main() -> None:
     ngrok_config = _read_ngrok_config()
     if ngrok_config is not None:
         exit_code = _run_ngrok(*ngrok_config)
-    else:
+    elif os.environ.get("DATA_STORE_TUNNEL_PROVIDER") == "localtunnel":
         exit_code = _run_localtunnel()
+    else:
+        exit_code = _run_cloudflare()
     # Provider exited; propagate so supervisord restarts us.
     sys.exit(exit_code)
 

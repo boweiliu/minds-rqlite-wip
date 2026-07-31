@@ -1,0 +1,242 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Todo — data-store demo</title>
+<style>
+  :root {
+    --bg: #0f0f10; --panel: #17181a; --panel-2: #1e1f22; --line: #2c2e33;
+    --fg: #e7e7e9; --muted: #9a9ca1; --accent: #d7d7db; --danger: #c98a8a; --ok: #8ab08a;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  header { padding: 18px 22px; border-bottom: 1px solid var(--line); display: flex; align-items: baseline; gap: 14px; }
+  header h1 { margin: 0; font-size: 16px; font-weight: 600; }
+  header a { color: var(--muted); font-size: 12px; text-decoration: none; }
+  header a:hover { color: var(--fg); }
+  main { max-width: 640px; margin: 0 auto; padding: 22px; display: grid; gap: 18px; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 18px; }
+  .panel h2 { margin: 0 0 12px; font-size: 12px; text-transform: uppercase; letter-spacing: 1px; color: var(--muted); }
+  .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  input[type=text], input[type=password] {
+    flex: 1; min-width: 200px; background: var(--panel-2); color: var(--fg);
+    border: 1px solid var(--line); border-radius: 6px; padding: 9px 11px; font: inherit;
+  }
+  button {
+    background: var(--panel-2); color: var(--fg); border: 1px solid var(--line);
+    border-radius: 6px; padding: 9px 13px; cursor: pointer; font: inherit;
+  }
+  button:hover { background: #26282c; }
+  button.danger { color: var(--danger); }
+  .hint { color: var(--muted); font-size: 12px; }
+  .hint code { background: var(--panel-2); padding: 1px 5px; border-radius: 4px; }
+  ul#list { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+  li.item {
+    display: flex; align-items: center; gap: 12px; padding: 11px 12px;
+    background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px; cursor: grab;
+  }
+  li.item.dragging { opacity: .45; border-style: dashed; }
+  li.item .grip { color: var(--muted); cursor: grab; user-select: none; }
+  li.item .title { flex: 1; }
+  li.item.done .title { color: var(--muted); text-decoration: line-through; }
+  li.item input[type=checkbox] { width: 17px; height: 17px; accent-color: #8ab08a; }
+  li.item button { padding: 4px 9px; }
+  .err { color: var(--danger); white-space: pre-wrap; }
+  .empty { color: var(--muted); padding: 8px 2px; }
+  .toast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%);
+    background: #26282c; border: 1px solid var(--line); padding: 8px 14px; border-radius: 6px;
+    opacity: 0; transition: opacity .2s; pointer-events: none; }
+  .toast.show { opacity: 1; }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Todo</h1>
+  <a href=".">← data-store home</a>
+  <a href="#" id="changeToken" style="margin-left:auto">change token</a>
+</header>
+
+<main>
+  <section class="panel hidden" id="tokenPanel">
+    <h2>Connect</h2>
+    <div class="hint" style="margin-bottom:10px">This demo talks to the store over its SQL API. Paste the bearer token (read it from <code>data/.apps/data_store/api_token</code> on the host). It's kept in this browser only.</div>
+    <div class="row">
+      <input type="password" id="tokenInput" placeholder="bearer token" autocomplete="off" />
+      <button id="tokenSave">Save</button>
+    </div>
+  </section>
+
+  <section class="panel" id="app">
+    <h2>My tasks</h2>
+    <div class="row" style="margin-bottom:14px">
+      <input type="text" id="newTitle" placeholder="Add a task and press Enter…" />
+      <button id="addBtn">Add</button>
+    </div>
+    <ul id="list"><li class="empty">Loading…</li></ul>
+    <div class="hint" id="status" style="margin-top:12px"></div>
+  </section>
+</main>
+
+<div class="toast" id="toast"></div>
+
+<script>
+"use strict";
+const TOKEN_KEY = "data_store_token";
+let token = null;
+
+const $ = (id) => document.getElementById(id);
+function toast(m) { const t = $("toast"); t.textContent = m; t.classList.add("show"); setTimeout(() => t.classList.remove("show"), 1500); }
+function esc(s) { return String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
+
+// One SQL call. `endpoint` is "query" (reads) or "execute" (writes). `statements`
+// is a list of [sql, ...params] in rqlite's native parameterized form.
+async function sql(endpoint, statements) {
+  const res = await fetch("api/" + endpoint + "?associative", {
+    method: "POST",
+    headers: { "Authorization": "Bearer " + (token || ""), "Content-Type": "application/json" },
+    body: JSON.stringify(statements),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (res.status === 401) { needToken("That token was rejected."); throw new Error("unauthorized"); }
+  if (!res.ok) throw new Error(data.error || ("HTTP " + res.status));
+  const results = data.results || [];
+  for (const r of results) { if (r.error) throw new Error(r.error); }
+  return results;
+}
+
+async function ensureSchema() {
+  await sql("execute", [[
+    "CREATE TABLE IF NOT EXISTS todos (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, done INTEGER NOT NULL DEFAULT 0, position INTEGER NOT NULL DEFAULT 0)"
+  ]]);
+}
+
+async function load() {
+  const list = $("list");
+  try {
+    await ensureSchema();
+    const [result] = await sql("query", [["SELECT id, title, done, position FROM todos ORDER BY position ASC, id ASC"]]);
+    render(result.rows || []);
+  } catch (e) {
+    if (e.message !== "unauthorized") list.innerHTML = '<li class="err">' + esc(e.message) + '</li>';
+  }
+}
+
+function render(rows) {
+  const list = $("list");
+  if (!rows.length) { list.innerHTML = '<li class="empty">No tasks yet — add one above.</li>'; $("status").textContent = ""; return; }
+  list.innerHTML = "";
+  for (const row of rows) {
+    const li = document.createElement("li");
+    li.className = "item" + (row.done ? " done" : "");
+    li.draggable = true;
+    li.dataset.id = row.id;
+    li.innerHTML =
+      '<span class="grip" title="Drag to reorder">⣿</span>' +
+      '<input type="checkbox" ' + (row.done ? "checked" : "") + ' />' +
+      '<span class="title">' + esc(row.title) + '</span>' +
+      '<button class="danger" data-del>Delete</button>';
+    li.querySelector("input").onchange = (e) => toggle(row.id, e.target.checked);
+    li.querySelector("[data-del]").onclick = () => remove(row.id);
+    list.appendChild(li);
+  }
+  $("status").textContent = rows.length + " task" + (rows.length === 1 ? "" : "s") + " · drag the ⣿ handle to reorder";
+}
+
+async function add() {
+  const input = $("newTitle");
+  const title = input.value.trim();
+  if (!title) return;
+  input.value = "";
+  try {
+    // position = one past the current max, so new tasks land at the bottom.
+    await sql("execute", [["INSERT INTO todos (title, done, position) VALUES (?, 0, (SELECT COALESCE(MAX(position), 0) + 1 FROM todos))", title]]);
+    await load();
+  } catch (e) { toast(e.message); }
+}
+
+async function toggle(id, done) {
+  try { await sql("execute", [["UPDATE todos SET done = ? WHERE id = ?", done ? 1 : 0, id]]); await load(); }
+  catch (e) { toast(e.message); }
+}
+
+async function remove(id) {
+  try { await sql("execute", [["DELETE FROM todos WHERE id = ?", id]]); await load(); }
+  catch (e) { toast(e.message); }
+}
+
+// Persist the current on-screen order into the position column.
+async function persistOrder() {
+  const ids = [...document.querySelectorAll("#list li.item")].map(li => Number(li.dataset.id));
+  if (!ids.length) return;
+  const statements = ids.map((id, index) => ["UPDATE todos SET position = ? WHERE id = ?", index, id]);
+  try { await sql("execute", statements); toast("Order saved"); await load(); }
+  catch (e) { toast(e.message); await load(); }
+}
+
+// --- Native drag-and-drop reordering ---
+function afterElement(container, y) {
+  const els = [...container.querySelectorAll("li.item:not(.dragging)")];
+  let closest = { offset: -Infinity, element: null };
+  for (const child of els) {
+    const box = child.getBoundingClientRect();
+    const offset = y - box.top - box.height / 2;
+    if (offset < 0 && offset > closest.offset) closest = { offset, element: child };
+  }
+  return closest.element;
+}
+
+const list = $("list");
+list.addEventListener("dragstart", (e) => {
+  const li = e.target.closest("li.item");
+  if (!li) return;
+  li.classList.add("dragging");
+  e.dataTransfer.effectAllowed = "move";
+});
+list.addEventListener("dragover", (e) => {
+  e.preventDefault();
+  const dragging = list.querySelector(".dragging");
+  if (!dragging) return;
+  const after = afterElement(list, e.clientY);
+  if (after == null) list.appendChild(dragging);
+  else list.insertBefore(dragging, after);
+});
+list.addEventListener("dragend", async (e) => {
+  const li = e.target.closest("li.item");
+  if (li) li.classList.remove("dragging");
+  await persistOrder();
+});
+
+function needToken(message) {
+  token = null;
+  localStorage.removeItem(TOKEN_KEY);
+  $("tokenPanel").classList.remove("hidden");
+  if (message) toast(message);
+}
+
+$("addBtn").onclick = add;
+$("newTitle").addEventListener("keydown", (e) => { if (e.key === "Enter") add(); });
+$("tokenSave").onclick = () => {
+  const value = $("tokenInput").value.trim();
+  if (!value) { toast("Paste a token first"); return; }
+  token = value;
+  localStorage.setItem(TOKEN_KEY, value);
+  $("tokenInput").value = "";
+  $("tokenPanel").classList.add("hidden");
+  load();
+};
+$("changeToken").onclick = (e) => { e.preventDefault(); $("tokenInput").value = ""; $("tokenPanel").classList.remove("hidden"); };
+
+function init() {
+  token = localStorage.getItem(TOKEN_KEY);
+  if (!token) { needToken(null); return; }
+  load();
+}
+init();
+</script>
+</body>
+</html>

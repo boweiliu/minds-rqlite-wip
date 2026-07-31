@@ -1,34 +1,35 @@
-"""Secure rqlite-backed JSON document store.
+"""Secure rqlite-backed SQL store exposed to token-authed callers.
 
 The security model is *structural*, not heuristic. The service runs two separate
 apps on two separate ports:
 
-- The **public app** (``PUBLIC_PORT``) exposes only the token-gated data API
-  (``/health`` + ``/api/collections/...``). This is the port the dedicated
-  tunnel forwards to the internet. It has no viewer and no way to read or rotate
-  the token -- so the token cannot be obtained through the public surface at all,
-  regardless of which tunnel provider is in front.
+- The **public app** (``PUBLIC_PORT``) exposes ``/health``, a demo client at
+  ``/``, and the token-gated rqlite SQL passthrough (``/db/query``,
+  ``/db/execute``, ``/db/request``). This is the port the tunnel forwards to the
+  internet. It has no way to read or rotate the token -- so the token cannot be
+  obtained through the public surface at all.
 
-- The **admin app** (``ADMIN_PORT``) serves the management viewer plus the
-  token-reveal / rotate endpoints. It is registered as the workspace tab and is
-  reached only through the local system_interface proxy; the tunnel never
+- The **admin app** (``ADMIN_PORT``) serves the management console at ``/`` plus
+  the token-reveal / rotate endpoints. It is registered as the workspace tab and
+  is reached only through the local system_interface proxy; the tunnel never
   forwards this port. As defense-in-depth, the token-reveal endpoints
-  additionally refuse any request that arrived through Cloudflare (i.e. the
-  workspace's own public URL), so the token is only handed to a genuinely local
-  request.
+  additionally refuse any request that arrived through Cloudflare, so the token
+  is only handed to a genuinely local request.
 
-Every data endpoint requires ``Authorization: Bearer <token>`` on both apps.
-Documents live in rqlite; only the token file and the tunnel's recorded URL live
-under ``DATA_DIR``. Both apps bind to loopback; TLS is terminated at the tunnel
-edge.
+Every ``/db`` endpoint requires ``Authorization: Bearer <token>`` on both apps
+and is forwarded to ``rqlited`` verbatim, so callers use rqlite's native
+request/response format and standard tooling. This is deliberately an
+*arbitrary-SQL* surface -- the bearer token is the whole gate. Both apps bind to
+loopback; TLS is terminated at the tunnel edge.
 """
 
 import os
-import re
 import threading
 from pathlib import Path
-from typing import Any
+from typing import Callable
 
+import httpx
+import segno
 from flask import Flask
 from flask import Response
 from flask import g
@@ -40,8 +41,8 @@ from data_store import db
 from data_store import security
 
 # Local state this process owns (the API token file, the tunnel's recorded public
-# URL) lives under DATA_DIR. The documents themselves live in rqlite.
-DATA_DIR = Path(os.environ.get("DATA_STORE_DATA_DIR", "runtime/data-store"))
+# URL) lives under DATA_DIR. The SQL data itself lives in rqlite.
+DATA_DIR = Path(os.environ.get("DATA_STORE_DATA_DIR", "data/.apps/data_store"))
 PUBLIC_URL_FILE = DATA_DIR / "public_url.txt"
 
 # The rqlite HTTP endpoint backing the store.
@@ -49,29 +50,19 @@ RQLITE_URL = os.environ.get("DATA_STORE_RQLITE_URL", "http://localhost:4001")
 
 # Presence of this file means the tunnel runs ngrok on a reserved domain, so the
 # public URL is permanent; otherwise the fallback tunnel URL is only interim.
-NGROK_SECRETS_FILE = Path("runtime/secrets/data_store_ngrok.env")
+NGROK_SECRETS_FILE = Path("data/.secrets/data_store_ngrok.env")
 
-# Two ports: the public (tunneled) data API and the local-only admin console.
+# Two ports: the public (tunneled) SQL API and the local-only admin console.
 PUBLIC_PORT = int(os.environ.get("DATA_STORE_PORT", "8080"))
 ADMIN_PORT = int(os.environ.get("DATA_STORE_ADMIN_PORT", "8084"))
 
-# A single document is capped so one request can't exhaust memory or disk.
-MAX_DOCUMENT_BYTES = 1_048_576  # 1 MiB
+# A single request body is capped so one call can't exhaust memory or disk.
+MAX_BODY_BYTES = 1_048_576  # 1 MiB
 
 # Generous per-client request ceiling: throttles floods without impeding a
-# legitimately busy agent. The 256-bit token is the real guard.
+# legitimately busy client. The 256-bit token is the real guard.
 RATE_LIMIT_MAX_REQUESTS = int(os.environ.get("DATA_STORE_RATE_LIMIT", "300"))
 RATE_LIMIT_WINDOW_SECONDS = 60.0
-
-# Pagination bounds for listing documents.
-DEFAULT_PAGE_LIMIT = 100
-MAX_PAGE_LIMIT = 1000
-MAX_AUDIT_ENTRIES = 500
-
-# Names are constrained so they are safe as identifiers and can't smuggle
-# anything odd through a URL. (Values are always parameterized regardless.)
-_COLLECTION_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
-_DOCUMENT_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 
 _ASSETS_DIR = Path(__file__).parent / "assets"
 
@@ -103,8 +94,9 @@ class _TokenStore:
 def _client_id() -> str:
     """Best identifier for the caller: the real client IP when behind a tunnel.
 
-    Tunnels (localtunnel, ngrok) and Cloudflare put the true client address in a
-    forwarded header; fall back to the socket peer for genuinely local requests.
+    Tunnels (cloudflare, ngrok, localtunnel) and Cloudflare put the true client
+    address in a forwarded header; fall back to the socket peer for genuinely
+    local requests.
     """
     forwarded = request.headers.get("X-Forwarded-For")
     if forwarded:
@@ -118,43 +110,25 @@ def _error(message: str, status: int) -> Response:
     return response
 
 
-def _require_valid_collection(collection: str) -> Response | None:
-    if not _COLLECTION_PATTERN.match(collection):
-        return _error("invalid collection name: use 1-64 chars of letters, digits, '-' or '_'", 400)
-    return None
-
-
-def _require_valid_document_id(doc_id: str) -> Response | None:
-    if not _DOCUMENT_ID_PATTERN.match(doc_id):
-        return _error("invalid document id: use 1-128 chars of letters, digits, '-', '_', '.' or ':'", 400)
-    return None
-
-
-def _parse_json_body() -> tuple[Any, Response | None]:
-    """Return (parsed_body, None) or (None, error_response)."""
-    raw = request.get_data()
-    if len(raw) > MAX_DOCUMENT_BYTES:
-        return None, _error(f"document exceeds {MAX_DOCUMENT_BYTES}-byte limit", 413)
-    if not raw:
-        return None, _error("request body must be non-empty JSON", 400)
-    body = request.get_json(silent=True)
-    if body is None:
-        return None, _error("request body must be valid JSON", 400)
-    return body, None
-
-
-def create_app(mode: str, token_store: _TokenStore, rate_limiter: security.RateLimiter, store_url: str) -> Flask:
+def create_app(
+    mode: str,
+    token_store: _TokenStore,
+    rate_limiter: security.RateLimiter,
+    store_url: str,
+    forwarder: Callable[[str, str, str, str, bytes], httpx.Response] = db.forward,
+) -> Flask:
     """Build one of the two apps.
 
-    ``mode`` is ``"public"`` (tunneled data API only) or ``"admin"`` (adds the
-    viewer and the local-only token endpoints). Dependencies are injected so
-    tests can supply their own.
+    ``mode`` is ``"public"`` (SQL API + demo client) or ``"admin"`` (adds the
+    console and the local-only token endpoints). Dependencies are injected so
+    tests can supply their own -- ``forwarder`` defaults to the real rqlite
+    passthrough but a test can pass a stub.
     """
     if mode not in ("public", "admin"):
         raise ConfigurationError(f"unknown app mode: {mode!r}")
     is_admin = mode == "admin"
     application = Flask(f"data_store_{mode}", static_folder=None)
-    application.config["MAX_CONTENT_LENGTH"] = MAX_DOCUMENT_BYTES
+    application.config["MAX_CONTENT_LENGTH"] = MAX_BODY_BYTES
 
     def _authorize() -> bool:
         """Validate the bearer token against the current one, in constant time."""
@@ -172,168 +146,176 @@ def create_app(mode: str, token_store: _TokenStore, rate_limiter: security.RateL
             return _error("rate limit exceeded", 429)
         return None
 
-    @application.after_request
-    def _after_request(response: Response) -> Response:
-        # Only the public app audits: its traffic is the security-relevant,
-        # internet-facing access. The admin viewer's own local calls are noise.
-        if not is_admin and request.path.startswith("/api/"):
-            db.record_audit(
-                base_url=store_url,
-                method=request.method,
-                path=request.path,
-                collection=request.view_args.get("collection") if request.view_args else None,
-                doc_id=request.view_args.get("doc_id") if request.view_args else None,
-                status=response.status_code,
-                authed=bool(getattr(g, "authed", False)),
-                remote=_client_id(),
-            )
-        return response
-
     @application.get("/health")
     def health() -> Response:
         return jsonify({"status": "ok"})
 
-    @application.get("/api/collections")
-    def list_collections() -> Response:
-        if not _authorize():
-            return _error("unauthorized", 401)
-        g.authed = True
-        return jsonify({"collections": db.list_collections(store_url)})
+    # --- User-facing pages (static HTML, no auth to load) ---
 
-    @application.get("/api/collections/<collection>")
-    def list_documents(collection: str) -> Response:
-        if not _authorize():
-            return _error("unauthorized", 401)
-        g.authed = True
-        invalid = _require_valid_collection(collection)
-        if invalid is not None:
-            return invalid
-        limit = min(request.args.get("limit", DEFAULT_PAGE_LIMIT, type=int) or DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT)
-        offset = max(request.args.get("offset", 0, type=int) or 0, 0)
-        return jsonify(db.list_documents(store_url, collection, limit, offset))
+    @application.get("/")
+    @application.get("/home")
+    def landing() -> Response:
+        return _page("landing.html")
 
-    @application.post("/api/collections/<collection>")
-    def create_document(collection: str) -> Response:
-        if not _authorize():
-            return _error("unauthorized", 401)
-        g.authed = True
-        invalid = _require_valid_collection(collection)
-        if invalid is not None:
-            return invalid
-        doc_id = request.args.get("id")
-        if doc_id is not None:
-            invalid_id = _require_valid_document_id(doc_id)
-            if invalid_id is not None:
-                return invalid_id
-        body, error = _parse_json_body()
-        if error is not None:
-            return error
-        try:
-            document = db.create_document(store_url, collection, body, doc_id)
-        except db.DocumentConflictError as conflict:
-            return _error(str(conflict), 409)
-        response = jsonify(document)
-        response.status_code = 201
-        return response
+    @application.get("/db")
+    @application.get("/manage")
+    def manage() -> Response:
+        # The database management console: browse tables, run SQL, rotate token.
+        # /manage is an alias for /db.
+        return _page("manage.html")
 
-    @application.get("/api/collections/<collection>/<doc_id>")
-    def get_document(collection: str, doc_id: str) -> Response:
-        if not _authorize():
-            return _error("unauthorized", 401)
-        g.authed = True
-        for invalid in (_require_valid_collection(collection), _require_valid_document_id(doc_id)):
-            if invalid is not None:
-                return invalid
-        document = db.get_document(store_url, collection, doc_id)
-        if document is None:
-            return _error("document not found", 404)
-        return jsonify(document)
+    @application.get("/demo")
+    def demo() -> Response:
+        # A self-contained sample app (a drag-and-drop todo list) that persists
+        # to the store through the same token-gated SQL API, to show a realistic
+        # client. Its own JS holds the token (from localStorage).
+        return _page("demo.html")
 
-    @application.put("/api/collections/<collection>/<doc_id>")
-    def put_document(collection: str, doc_id: str) -> Response:
-        if not _authorize():
-            return _error("unauthorized", 401)
-        g.authed = True
-        for invalid in (_require_valid_collection(collection), _require_valid_document_id(doc_id)):
-            if invalid is not None:
-                return invalid
-        body, error = _parse_json_body()
-        if error is not None:
-            return error
-        return jsonify(db.put_document(store_url, collection, doc_id, body))
+    @application.get("/llms.txt")
+    def llms_txt() -> Response:
+        # Agent-facing documentation: how a coding agent / LLM client talks to
+        # the SQL API. Plain text, with the live public URL filled in.
+        public_url = PUBLIC_URL_FILE.read_text().strip() if PUBLIC_URL_FILE.exists() else None
+        return Response(_render_llms_txt(public_url), mimetype="text/plain")
 
-    @application.delete("/api/collections/<collection>/<doc_id>")
-    def delete_document(collection: str, doc_id: str) -> Response:
-        if not _authorize():
-            return _error("unauthorized", 401)
-        g.authed = True
-        for invalid in (_require_valid_collection(collection), _require_valid_document_id(doc_id)):
-            if invalid is not None:
-                return invalid
-        if not db.delete_document(store_url, collection, doc_id):
-            return _error("document not found", 404)
-        return jsonify({"deleted": True, "collection": collection, "id": doc_id})
+    # --- The SQL API, token-gated, forwarded verbatim to rqlite ---
 
-    @application.delete("/api/collections/<collection>")
-    def delete_collection(collection: str) -> Response:
+    def _forward(endpoint: str) -> Response:
         if not _authorize():
             return _error("unauthorized", 401)
         g.authed = True
-        invalid = _require_valid_collection(collection)
-        if invalid is not None:
-            return invalid
-        removed = db.delete_collection(store_url, collection)
-        return jsonify({"deleted": True, "collection": collection, "documents_removed": removed})
+        upstream = forwarder(store_url, endpoint, request.method, request.query_string.decode(), request.get_data())
+        return Response(
+            upstream.content,
+            status=upstream.status_code,
+            content_type=upstream.headers.get("content-type", "application/json"),
+        )
+
+    @application.get("/api")
+    def api_index() -> Response:
+        return jsonify(
+            {
+                "endpoints": {
+                    "query": "POST /api/query — read statements",
+                    "execute": "POST /api/execute — write statements",
+                    "request": "POST /api/request — unified read+write",
+                },
+                "auth": "Authorization: Bearer <token>",
+                "format": "rqlite native, e.g. [[\"SELECT ?\", 1]]; add ?associative for object rows",
+                "docs": "/llms.txt",
+            }
+        )
+
+    @application.get("/api/query")
+    @application.post("/api/query")
+    def api_query() -> Response:
+        return _forward("query")
+
+    @application.post("/api/execute")
+    def api_execute() -> Response:
+        return _forward("execute")
+
+    @application.post("/api/request")
+    def api_request() -> Response:
+        return _forward("request")
 
     if is_admin:
-        _register_admin_routes(application, token_store, store_url, _authorize)
+        _register_admin_routes(application, token_store)
 
     return application
 
 
-def _register_admin_routes(
-    application: Flask,
-    token_store: _TokenStore,
-    store_url: str,
-    authorize: Any,
-) -> None:
-    """Register the viewer and the local-only token endpoints (admin app only)."""
+def _page(filename: str) -> Response:
+    return Response((_ASSETS_DIR / filename).read_text(), mimetype="text/html")
 
-    @application.get("/")
-    def viewer() -> Response:
-        return Response((_ASSETS_DIR / "viewer.html").read_text(), mimetype="text/html")
 
-    @application.get("/api/audit")
-    def audit() -> Response:
-        if not authorize():
-            return _error("unauthorized", 401)
-        g.authed = True
-        limit = min(request.args.get("limit", 100, type=int) or 100, MAX_AUDIT_ENTRIES)
-        return jsonify({"entries": db.list_audit(store_url, limit)})
+def _render_llms_txt(public_url: str | None) -> str:
+    """Agent-facing docs for the SQL API, with the live public URL filled in."""
+    base = public_url or "https://<your-public-url>"
+    return f"""# data-store
 
-    @application.get("/api/local/connection")
-    def local_connection() -> Response:
+A private rqlite (SQLite-over-HTTP) database exposed to the internet behind one
+bearer token. You (an agent or client) can run arbitrary SQL against it.
+
+Base URL: {base}
+Auth: every /api request needs the header `Authorization: Bearer <token>`.
+The token is secret and is NOT served over HTTP -- the human operator reads it
+from the file `data/.apps/data_store/api_token` in the workspace and gives it to
+you. Never expect an endpoint to hand you the token.
+
+## Endpoints
+
+- POST {base}/api/query   -- read statements (SELECT, PRAGMA, ...)
+- POST {base}/api/execute -- write statements (INSERT, UPDATE, DELETE, DDL)
+- POST {base}/api/request -- unified read+write in one call
+- GET  {base}/health      -- liveness, no auth
+
+## Request format (rqlite native)
+
+The body is a JSON array of statements. Each statement is an array of
+`[sql, ...params]`; use `?` placeholders and pass values as params (never string
+-interpolate them). Add `?associative` to get result rows as JSON objects.
+
+Read example:
+
+  curl -H "Authorization: Bearer $TOKEN" \\
+       -d '[["SELECT id, title FROM todos WHERE done = ?", 0]]' \\
+       '{base}/api/query?associative'
+
+  -> {{"results":[{{"types":{{...}},"rows":[{{"id":1,"title":"..."}}]}}]}}
+
+Write example (multiple statements run in order; add ?transaction to make them atomic):
+
+  curl -H "Authorization: Bearer $TOKEN" \\
+       -d '[["INSERT INTO todos(title,done) VALUES(?,0)", "write docs"]]' \\
+       '{base}/api/execute'
+
+  -> {{"results":[{{"last_insert_id":1,"rows_affected":1}}]}}
+
+## Notes
+
+- There is no fixed schema; create whatever tables you need with DDL via /api/execute.
+- Errors come back per-statement as a "error" key inside that statement's result.
+- Request bodies are capped at 1 MiB and there is a per-client rate limit.
+- Only these SQL endpoints are exposed; rqlite admin endpoints (backup/load/node
+  control) are not reachable.
+- Full rqlite API reference: https://rqlite.io/docs/api/
+"""
+
+
+def _register_admin_routes(application: Flask, token_store: _TokenStore) -> None:
+    """Register the local-only token / connection endpoints (admin app only)."""
+
+    @application.get("/admin/connection")
+    def admin_connection() -> Response:
         # Defense-in-depth: even on this non-tunneled port, refuse anything that
         # arrived through the workspace's own Cloudflare tunnel.
         if not security.is_local_request(request.headers):
             return _error("not available", 403)
         public_url = PUBLIC_URL_FILE.read_text().strip() if PUBLIC_URL_FILE.exists() else None
-        api_base = f"{public_url}/api" if public_url else None
+        qr_svg = segno.make(public_url, error="m").svg_data_uri(scale=4, border=2) if public_url else None
+        # The token is deliberately NOT included: it is only readable from the
+        # on-disk file (see token_file). This endpoint returns non-secret
+        # connection info only.
         return jsonify(
             {
-                "token": token_store.get(),
                 "public_url": public_url,
-                "api_base": api_base,
+                "api_base": f"{public_url}/api" if public_url else None,
+                "qr_svg": qr_svg,
                 "permanent_url": NGROK_SECRETS_FILE.exists(),
-                "note": "Send the token as 'Authorization: Bearer <token>'.",
+                "token_file": str(security.token_path(DATA_DIR)),
+                "note": "Read the token from token_file, then send 'Authorization: Bearer <token>' to /api/query and /api/execute in rqlite's native format.",
             }
         )
 
-    @application.post("/api/local/rotate")
-    def local_rotate() -> Response:
+    @application.post("/admin/rotate")
+    def admin_rotate() -> Response:
         if not security.is_local_request(request.headers):
             return _error("not available", 403)
-        return jsonify({"token": token_store.rotate()})
+        # Regenerate the on-disk token but never return it -- the new value is
+        # readable only from the file.
+        token_store.rotate()
+        return jsonify({"rotated": True, "token_file": str(security.token_path(DATA_DIR))})
 
 
 def _serve(application: Flask, port: int) -> None:
@@ -341,7 +323,7 @@ def _serve(application: Flask, port: int) -> None:
 
 
 def main() -> None:
-    db.initialize_database(RQLITE_URL)
+    db.wait_for_rqlite(RQLITE_URL)
     token_store = _TokenStore(DATA_DIR)
     rate_limiter = security.RateLimiter(RATE_LIMIT_MAX_REQUESTS, RATE_LIMIT_WINDOW_SECONDS)
     public_app = create_app("public", token_store, rate_limiter, RQLITE_URL)

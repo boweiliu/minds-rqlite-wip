@@ -1,5 +1,13 @@
 # data-store — progress & handoff
 
+> **Note (2026-07-30 adaptation):** this doc describes the ORIGINAL design, whose
+> public surface was a bespoke `/api/collections` CRUD wrapper. On adoption that
+> was scratched: the store now exposes rqlite's **native SQL API** (arbitrary
+> SQL) at `/db/query|execute|request`, bearer-token gated, and the public tunnel
+> defaults to a Cloudflare quick tunnel. See `README.md` and the manifest's
+> Adaptation history for the current state. The security model (two-port split,
+> local-only token reveal) below still applies.
+
 **Goal:** expose the workspace's SQLite/rqlite data store on a **stable, permanent
 public URL** so external (non-minds) cloud agents can read/write it securely.
 Data and code stay in this workspace; only a tunnel forwards to it.
@@ -11,11 +19,11 @@ remaining piece is making the URL **permanent**. This doc is the resume point.
 
 ## What's built and working
 
-A `data-store` lib (`libs/data_store/`) running as three supervisord services:
+A `data-store` app (`system/apps/data_store/`) running as three supervisord services:
 
 | Service | What it is |
 |---|---|
-| `data-store-rqlite` | `rqlited` on `localhost:4001` (raft `:4002`), data under `runtime/data-store/rqlite`. The storage engine. |
+| `data-store-rqlite` | `rqlited` on `localhost:4001` (raft `:4002`), data under `data/.apps/data_store/rqlite`. The storage engine. |
 | `data-store` | The Flask app. Runs **two** ports (see security below). |
 | `data-store-tunnel` | The public tunnel (localtunnel now; ngrok-ready — see below). |
 
@@ -39,7 +47,7 @@ Two ports, so the token is never on the internet-facing surface:
   endpoints additionally refuse any request bearing Cloudflare edge headers
   (defense-in-depth for the workspace's own tunnel).
 
-Other: token file `runtime/data-store/api_token` (mode `0600`); 1 MiB body cap;
+Other: token file `data/.apps/data_store/api_token` (mode `0600`); 1 MiB body cap;
 per-client rate limit; audit log (in the console's Activity tab); loopback binds;
 TLS terminated at the tunnel edge.
 
@@ -50,7 +58,7 @@ token/rotate/viewer/audit all 404; no/wrong token 401; real token 200).
 
 ## Current live state
 
-- Interim public URL via **localtunnel** (written to `runtime/data-store/public_url.txt`).
+- Interim public URL via **localtunnel** (written to `data/.apps/data_store/public_url.txt`).
   It is **not** stable — the hostname can change on restart. That's the whole
   remaining problem.
 - The live token is shown in the console's **Connection** tab. (Several tokens
@@ -62,7 +70,7 @@ token/rotate/viewer/audit all 404; no/wrong token 401; real token 200).
 
 A permanent URL needs an **account-backed tunnel**. Chosen approach: **ngrok**
 (free tier includes one permanent static domain). The service is already wired:
-`tunnel.py` reads `runtime/secrets/data_store_ngrok.env` with:
+`tunnel.py` reads `data/.secrets/data_store_ngrok.env` with:
 
 ```
 export NGROK_AUTHTOKEN="..."
