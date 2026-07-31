@@ -1,0 +1,322 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>data-store — rqlite SQL API</title>
+<style>
+  :root {
+    --bg: #0f0f10; --panel: #17181a; --panel-2: #1e1f22; --line: #2c2e33;
+    --fg: #e7e7e9; --muted: #9a9ca1; --accent: #d7d7db; --danger: #c98a8a;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  header { padding: 18px 22px; border-bottom: 1px solid var(--line); }
+  header h1 { margin: 0; font-size: 16px; font-weight: 600; letter-spacing: .3px; }
+  header p { margin: 4px 0 0; color: var(--muted); font-size: 12px; }
+  main { max-width: 980px; margin: 0 auto; padding: 22px; display: grid; gap: 22px; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 18px; }
+  .panel h2 { margin: 0 0 14px; font-size: 12px; text-transform: uppercase; letter-spacing: 1px; color: var(--muted); }
+  .row { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
+  .row label { width: 90px; color: var(--muted); font-size: 12px; }
+  .val {
+    flex: 1; min-width: 220px; background: var(--panel-2); border: 1px solid var(--line);
+    border-radius: 6px; padding: 8px 10px; color: var(--fg); overflow-x: auto; white-space: nowrap;
+  }
+  button {
+    background: var(--panel-2); color: var(--fg); border: 1px solid var(--line);
+    border-radius: 6px; padding: 8px 12px; cursor: pointer; font: inherit;
+  }
+  button:hover { background: #26282c; }
+  button.danger { color: var(--danger); }
+  input[type=text], input[type=password], textarea {
+    background: var(--panel-2); color: var(--fg); border: 1px solid var(--line);
+    border-radius: 6px; padding: 8px 10px; font: inherit; width: 100%;
+  }
+  .row input { flex: 1; min-width: 220px; width: auto; }
+  textarea { resize: vertical; min-height: 74px; }
+  .grid2 { display: grid; grid-template-columns: 1fr auto; gap: 18px; align-items: start; }
+  #qr { background: #fff; padding: 8px; border-radius: 8px; width: 148px; height: 148px; }
+  #qr img { width: 100%; height: 100%; display: block; }
+  .hint { color: var(--muted); font-size: 12px; }
+  .hint code { background: var(--panel-2); padding: 1px 5px; border-radius: 4px; }
+  .tables { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+  .tables button.active { border-color: var(--accent); background: #303237; }
+  table.data { border-collapse: collapse; width: 100%; font-size: 13px; }
+  table.data th, table.data td { border: 1px solid var(--line); padding: 6px 9px; text-align: left; white-space: nowrap; }
+  table.data th { background: var(--panel-2); color: var(--muted); position: sticky; top: 0; }
+  .scroll { overflow: auto; max-height: 420px; border: 1px solid var(--line); border-radius: 6px; }
+  .toast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%);
+    background: #26282c; border: 1px solid var(--line); padding: 8px 14px; border-radius: 6px;
+    opacity: 0; transition: opacity .2s; pointer-events: none; }
+  .toast.show { opacity: 1; }
+  .err { color: var(--danger); white-space: pre-wrap; }
+  code.inline { background: var(--panel-2); padding: 1px 5px; border-radius: 4px; }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+<header>
+  <h1>data-store — manage</h1>
+  <p>Browse tables, run SQL, and manage the access token.
+     <a href="." style="color:var(--muted)">← home</a> ·
+     <a href="demo" style="color:var(--muted)">demo →</a></p>
+</header>
+
+<main>
+  <section class="panel" id="connection">
+    <h2>Connection</h2>
+    <div class="grid2">
+      <div id="conn-fields">
+        <div class="row">
+          <label>API URL</label>
+          <span class="val" id="apiUrl">—</span>
+          <button data-copy="apiUrl">Copy</button>
+        </div>
+        <div class="row">
+          <label>Token</label>
+          <input type="password" id="tokenInput" placeholder="paste the token" autocomplete="off" />
+          <button id="tokenSet">Use</button>
+          <button id="tokenForget" class="hidden">Forget</button>
+        </div>
+        <div class="hint" id="tokenHint"></div>
+        <div class="hint" id="urlState" style="margin-top:6px"></div>
+        <div class="hint" style="margin-top:10px">
+          Example: <code class="inline">curl -H "Authorization: Bearer &lt;token&gt;" -d '[["SELECT 1"]]' &lt;API URL&gt;/query</code>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="panel hidden" id="tokenPanel">
+    <h2>Token management</h2>
+    <div class="hint" id="tokenPanelHint" style="margin-bottom:12px"></div>
+    <button class="danger" id="rotate">Rotate token</button>
+  </section>
+
+  <section class="panel hidden" id="browser">
+    <h2>Tables</h2>
+    <div class="tables" id="tableList"><span class="hint">Loading…</span></div>
+    <div class="scroll"><div id="tableData" style="padding:10px"><span class="hint">Pick a table to see its contents.</span></div></div>
+  </section>
+
+  <section class="panel hidden" id="runner">
+    <h2>Run SQL</h2>
+    <textarea id="sqlBox" placeholder="SELECT name FROM sqlite_master WHERE type='table';"></textarea>
+    <div class="row" style="margin-top:10px">
+      <button id="runSql">Run</button>
+      <span class="hint">Reads and writes both work (routed through rqlite's /api/request).</span>
+    </div>
+    <div class="scroll" style="margin-top:10px"><div id="sqlResult" style="padding:10px"></div></div>
+  </section>
+</main>
+
+<div class="toast" id="toast"></div>
+
+<script>
+"use strict";
+// Shared with the /demo app: same origin + same key means the token, once
+// entered on any user-facing page, is reused across all of them and survives
+// refresh.
+const TOKEN_KEY = "data_store_token";
+let token = null;
+let apiBase = null;        // "<origin>/api"
+let activeTable = null;
+
+const $ = (id) => document.getElementById(id);
+
+function toast(msg) {
+  const t = $("toast"); t.textContent = msg; t.classList.add("show");
+  setTimeout(() => t.classList.remove("show"), 1800);
+}
+
+async function api(endpoint, statement) {
+  // endpoint: "query" (read) or "request" (read+write). Associative rows.
+  const res = await fetch("api/" + endpoint + "?associative", {
+    method: "POST",
+    headers: { "Authorization": "Bearer " + (token || ""), "Content-Type": "application/json" },
+    body: JSON.stringify([[statement]]),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (res.status === 401) {
+    // A saved token that no longer works (e.g. rotated elsewhere): drop it and re-prompt.
+    localStorage.removeItem(TOKEN_KEY);
+    token = null;
+    $("tokenForget").classList.add("hidden");
+    $("browser").classList.add("hidden");
+    $("runner").classList.add("hidden");
+    $("tokenInput").placeholder = "token rejected — paste a valid one";
+    throw new Error("unauthorized — token cleared, paste a valid one");
+  }
+  if (!res.ok) throw new Error(data.error || ("HTTP " + res.status));
+  const result = (data.results || [{}])[0];
+  if (result.error) throw new Error(result.error);
+  return result;
+}
+
+function renderRows(container, result) {
+  const rows = result.rows || [];
+  if (!rows.length) {
+    if (result.rows_affected !== undefined) {
+      container.innerHTML = '<span class="hint">OK — ' + result.rows_affected + ' row(s) affected'
+        + (result.last_insert_id !== undefined ? ', last id ' + result.last_insert_id : '') + '.</span>';
+    } else {
+      container.innerHTML = '<span class="hint">No rows.</span>';
+    }
+    return;
+  }
+  const cols = result.types ? Object.keys(result.types) : Object.keys(rows[0]);
+  let html = '<table class="data"><thead><tr>' + cols.map(c => '<th>' + esc(c) + '</th>').join('') + '</tr></thead><tbody>';
+  for (const r of rows) {
+    html += '<tr>' + cols.map(c => '<td>' + esc(fmt(r[c])) + '</td>').join('') + '</tr>';
+  }
+  container.innerHTML = html + '</tbody></table>';
+}
+
+function fmt(v) { return v === null || v === undefined ? '' : (typeof v === 'object' ? JSON.stringify(v) : String(v)); }
+function esc(s) { return String(s).replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c])); }
+
+async function loadTables() {
+  const list = $("tableList");
+  try {
+    const result = await api("query", "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name");
+    const names = (result.rows || []).map(r => r.name);
+    if (!names.length) { list.innerHTML = '<span class="hint">No tables yet. Create one in "Run SQL".</span>'; return; }
+    list.innerHTML = '';
+    for (const name of names) {
+      const b = document.createElement("button");
+      b.textContent = name;
+      b.onclick = () => browseTable(name, b);
+      list.appendChild(b);
+    }
+  } catch (e) {
+    list.innerHTML = '<span class="err">' + esc(e.message) + '</span>';
+  }
+}
+
+async function browseTable(name, btn) {
+  activeTable = name;
+  document.querySelectorAll("#tableList button").forEach(b => b.classList.toggle("active", b === btn));
+  const target = $("tableData");
+  target.innerHTML = '<span class="hint">Loading…</span>';
+  try {
+    const result = await api("query", 'SELECT * FROM "' + name.replace(/"/g, '""') + '" LIMIT 100');
+    renderRows(target, result);
+  } catch (e) {
+    target.innerHTML = '<span class="err">' + esc(e.message) + '</span>';
+  }
+}
+
+async function runSql() {
+  const stmt = $("sqlBox").value.trim();
+  if (!stmt) return;
+  const target = $("sqlResult");
+  target.innerHTML = '<span class="hint">Running…</span>';
+  try {
+    const result = await api("request", stmt);
+    renderRows(target, result);
+    loadTables();
+    if (activeTable) {
+      const b = [...document.querySelectorAll("#tableList button")].find(x => x.textContent === activeTable);
+      if (b) browseTable(activeTable, b);
+    }
+  } catch (e) {
+    target.innerHTML = '<span class="err">' + esc(e.message) + '</span>';
+  }
+}
+
+function copyFrom(id) {
+  navigator.clipboard.writeText($(id).textContent || "").then(() => toast("Copied")).catch(() => toast("Copy failed"));
+}
+
+function enableDemo() {
+  $("browser").classList.remove("hidden");
+  $("runner").classList.remove("hidden");
+  loadTables();
+}
+
+async function init() {
+  // The token is never served over HTTP: it is read from the on-disk file and
+  // pasted here. The local-only endpoint gives us the URL only.
+  try {
+    const res = await fetch("admin/connection");
+    if (!res.ok) throw new Error("not local");
+    const conn = await res.json();
+    apiBase = conn.api_base || (location.origin + "/api");
+    $("apiUrl").textContent = apiBase;
+    const tokenFile = conn.token_file || "data/.apps/data_store/api_token";
+    $("tokenHint").innerHTML = "Read the token from <code>" + esc(tokenFile) + "</code> on the host, then paste it here.";
+    // Token management is local-only (this admin console), so it appears only here.
+    $("tokenPanel").classList.remove("hidden");
+    $("tokenPanelHint").innerHTML = "The token lives only in <code>" + esc(tokenFile) + "</code> and is never shown here. Rotating generates a new one in that file and immediately invalidates the old token — any client using it must switch to the new value.";
+    $("urlState").textContent = conn.public_url
+      ? (conn.permanent_url ? "Permanent URL (ngrok)." : "Interim URL — changes if the tunnel restarts.")
+      : "Public tunnel not up yet — URL will appear once it connects.";
+  } catch (e) {
+    // Public page: no local endpoint. URL is wherever we're served from.
+    apiBase = location.origin + "/api";
+    $("apiUrl").textContent = apiBase;
+    $("tokenHint").innerHTML = "Read the token from <code>data/.apps/data_store/api_token</code> in the workspace, then paste it here.";
+    $("urlState").textContent = "You're on the public URL.";
+  }
+
+  // Reuse a token saved in this browser (shared across /db, /manage, /demo; survives refresh).
+  const stored = localStorage.getItem(TOKEN_KEY);
+  if (stored) {
+    token = stored;
+    $("tokenInput").placeholder = "saved in this browser — paste to replace";
+    $("tokenForget").classList.remove("hidden");
+    enableDemo();
+  }
+}
+
+document.addEventListener("click", (ev) => {
+  const c = ev.target.closest("[data-copy]");
+  if (c) copyFrom(c.getAttribute("data-copy"));
+});
+$("runSql").onclick = runSql;
+$("tokenSet").onclick = () => {
+  const value = $("tokenInput").value.trim();
+  if (!value) { toast("Paste the token first"); return; }
+  token = value;
+  localStorage.setItem(TOKEN_KEY, token);   // persist across tabs + refresh
+  $("tokenInput").value = "";
+  $("tokenInput").placeholder = "saved in this browser — paste to replace";
+  $("tokenForget").classList.remove("hidden");
+  toast("Token saved in this browser");
+  enableDemo();
+};
+$("tokenForget").onclick = () => {
+  localStorage.removeItem(TOKEN_KEY);
+  token = null;
+  $("tokenInput").value = "";
+  $("tokenInput").placeholder = "paste the token";
+  $("tokenForget").classList.add("hidden");
+  $("browser").classList.add("hidden");
+  $("runner").classList.add("hidden");
+  toast("Token forgotten in this browser");
+};
+$("rotate").onclick = async () => {
+  if (!confirm("Rotate the token? The current token stops working immediately and every client using it must switch to the new value (read it from the token file).")) return;
+  const res = await fetch("admin/rotate", { method: "POST" });
+  if (res.ok) {
+    token = null;
+    localStorage.removeItem(TOKEN_KEY);
+    $("tokenInput").value = "";
+    $("tokenInput").placeholder = "paste the token";
+    $("tokenForget").classList.add("hidden");
+    $("browser").classList.add("hidden");
+    $("runner").classList.add("hidden");
+    toast("Rotated — read the new token from the file and paste it again");
+  } else {
+    toast("Rotate failed");
+  }
+};
+
+init();
+</script>
+</body>
+</html>

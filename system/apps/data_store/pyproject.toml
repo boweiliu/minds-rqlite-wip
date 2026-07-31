@@ -1,0 +1,23 @@
+[project]
+name = "data-store"
+version = "0.1.0"
+description = "rqlite-backed SQL store exposing rqlite's native API to token-authed external clients, with a management console"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "flask>=3.0",
+    "werkzeug>=3.0",
+    "httpx>=0.27",
+    "segno>=1.6",
+]
+
+[project.scripts]
+data-store = "data_store.runner:main"
+data-store-tunnel = "data_store.tunnel:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/data_store"]
